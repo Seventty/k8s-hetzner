@@ -1,109 +1,109 @@
-# Kubernetes setup with Kubespray
+# Kubernetes Setup on Hetzner using Kubespray
 
-[](https://github.com/morrismusumi/kubernetes/tree/main/cloud/hetzner/kubespray#kubernetes-setup-with-kubespray)
+This guide explains how to deploy a **Kubernetes cluster on Hetzner Cloud using Kubespray and Ansible**.
 
-## Prerequisites
+The cluster architecture used in this setup consists of:
 
-[](https://github.com/morrismusumi/kubernetes/tree/main/cloud/hetzner/kubespray#prerequisites)
+- **1 Jump Node / Master Node**
+- **1 Control Plane Node**
+- **2 Worker Nodes**
+- **Private network for internal cluster communication**
 
-Login to the jump-server and create the project directory and upgrade all system dependencies
+Kubespray will be executed from the **jump node**, which will configure Kubernetes across all nodes using Ansible.
 
-```shell
-$ ssh root@JUMP-SERVER-IP
+---
 
-$ mkdir kube-setup && cd kube-setup
+# Prerequisites
 
-$ sudo apt update && sudo apt upgrade -y
-```
+First connect to the **jump server** and prepare the environment.
 
-Clone the kubespray repository and install Ansible
+```bash
+ssh root@JUMP-SERVER-IP
+Create a working directory and update the system:
 
-```shell
-$ git clone https://github.com/kubernetes-sigs/kubespray.git
+mkdir kube-setup && cd kube-setup
 
-$ VENVDIR=kubespray-venv
-$ KUBESPRAYDIR=kubespray
-$ python3 -m venv $VENVDIR
-$ source $VENVDIR/bin/activate
-$ cd $KUBESPRAYDIR
-$ pip install -U -r requirements.txt
-$ cd ..
+apt update && apt upgrade -y
+Installing Kubespray and Ansible
+Clone the Kubespray repository:
 
-```
+git clone https://github.com/kubernetes-sigs/kubespray.git
+Create a Python virtual environment and install the dependencies:
 
-If you dont have python-venv install it with apt install python3-venv -y
+VENVDIR=kubespray-venv
+KUBESPRAYDIR=kubespray
 
-##
+python3 -m venv $VENVDIR
+source $VENVDIR/bin/activate
 
-Preparing the necessary files
+cd $KUBESPRAYDIR
+pip install -U -r requirements.txt
+cd ..
+If the virtual environment module is not installed, install it with:
 
-[](https://github.com/morrismusumi/kubernetes/tree/main/cloud/hetzner/kubespray#preparing-the-necessary-files)
+apt install python3-venv -y
+Preparing the Cluster Configuration
+Create the directory that will contain the cluster configuration:
 
-Create the cluster configuration directory
+mkdir -p clusters/eu-central
+Generating the Inventory
+We will use the internal IP addresses assigned by Terraform.
 
-```shell
-$ mkdir -p clusters/eu-central
-```
+declare -a IPS=(172.16.0.101 172.16.0.102 172.16.0.103)
 
-Generate the inventory file.
+CONFIG_FILE=clusters/eu-central/hosts.yaml \
+python3 kubespray/contrib/inventory_builder/inventory.py ${IPS[@]}
+Navigate to the cluster configuration directory:
 
-```shell
-$ declare -a IPS=(172.16.0.101 172.16.0.102 172.16.0.103)
-$ CONFIG_FILE=clusters/eu-central/hosts.yaml python3 kubespray/contrib/inventory_builder/inventory.py ${IPS[@]}
+cd clusters/eu-central
+Edit the generated hosts.yaml file so that it matches the node names used in Hetzner.
 
-Go to the following path:
+Example:
 
-```
-
-cd /kube-setup/clusters/eu-central
-
-And there create a hosts.yaml with:
-
-```yaml
 all:
   hosts:
     kube-node-1:
       ansible_host: 172.16.0.101
       ip: 172.16.0.101
       access_ip: 172.16.0.101
+
     kube-node-2:
       ansible_host: 172.16.0.102
       ip: 172.16.0.102
       access_ip: 172.16.0.102
+
     kube-node-3:
       ansible_host: 172.16.0.103
       ip: 172.16.0.103
       access_ip: 172.16.0.103
+
   children:
+
     kube_control_plane:
       hosts:
         kube-node-1:
+
     kube_node:
       hosts:
         kube-node-2:
         kube-node-3:
+
     etcd:
       hosts:
         kube-node-1:
+
     k8s_cluster:
       children:
         kube_control_plane:
         kube_node:
+
     calico_rr:
       hosts: {}
+Cluster Custom Configuration
+Create the cluster configuration file:
 
-# Edit the hosts.yaml file and match the name of the nodes to the server names in hetzner
-```
-
-$ vi clusters/eu-central/hosts.yaml
-
-Create the cluster custom configuration file with the contents below
-
-```shell
-$ vi clusters/eu-central/cluster-config.yaml
-
-# Custom cofiguration options for hcloud as a cloud provider
-$ cat clusters/eu-central/cluster-config.yaml
+vi clusters/eu-central/cluster-config.yaml
+Add the following configuration:
 
 cloud_provider: external
 external_cloud_provider: hcloud
@@ -117,43 +117,74 @@ external_hcloud_cloud:
 
 kube_network_plugin: cilium
 network_id: kubernetes-node-network
-```
+This configuration enables Hetzner as an external cloud provider and configures Cilium as the networking plugin.
 
-## Deploying the Cluster
+Deploying the Kubernetes Cluster
+Once the configuration is ready, deploy the cluster using the Kubespray playbook.
 
-[](https://github.com/morrismusumi/kubernetes/tree/main/cloud/hetzner/kubespray#deploying-the-cluster)
+Navigate to the Kubespray directory:
 
-Deploy a new kubernetes cluster
+cd kubespray
+Run the Ansible playbook:
 
-```shell
-$ cd kubespray
-$ ansible-playbook -i ../clusters/eu-central/hosts.yaml -e @../clusters/eu-central/cluster-config.yaml --become --become-user=root cluster.yml
-```
+ansible-playbook \
+-i ../clusters/eu-central/hosts.yaml \
+-e @../clusters/eu-central/cluster-config.yaml \
+--become --become-user=root \
+cluster.yml
+The installation may take several minutes as Kubespray installs all Kubernetes components across the nodes.
 
-## Connecting to the Cluster
+Troubleshooting: Nodes stuck in NotReady
+After installation, nodes may appear in a NotReady state:
 
-[](https://github.com/morrismusumi/kubernetes/tree/main/cloud/hetzner/kubespray#connecting-to-the-cluster)
+kubectl get nodes
+Example:
 
-Install kubectl.
+NAME          STATUS     ROLES           AGE   VERSION
+kube-node-1   NotReady   control-plane   ...
+kube-node-2   NotReady   <none>          ...
+kube-node-3   NotReady   <none>          ...
+This can happen if CNI permissions are incorrect.
 
-```shell
-$ curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-$ chmod +x kubectl
-$ mv kubectl /usr/local/bin
-```
+Fix it by running the following command from the jump node:
 
-Copy the KUBECONFIG file from one of the control-plane nodes
+for node in 172.16.0.101 172.16.0.102 172.16.0.103; do
+  ssh root@$node "chown -R root:root /opt/cni && chown -R root:root /opt/cni/bin"
+done
+Restart the Cilium daemonset:
 
-```shell
-$ mkdir /root/.kube
-$ scp root@172.16.0.101:/etc/kubernetes/admin.conf /root/.kube/config
+kubectl -n kube-system rollout restart daemonset/cilium
+Monitor the pods:
 
-# Edit the config file IP address and set it to the IP of the master node
-$ vi /root/.kube/config
+kubectl -n kube-system get pods -l k8s-app=cilium -w
+Once the networking components are running, the nodes should transition to:
 
-# Test the connection to the cluster
-$ kubectl get nodes
+Ready
+Connecting to the Cluster
+Install kubectl on the jump node:
 
-# Check that the cluster control-plane components are running
-$ kubectl -n kube-system get pods
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+chmod +x kubectl
+mv kubectl /usr/local/bin
+Create the kubeconfig directory:
+
+mkdir /root/.kube
+Copy the configuration file from the control plane node:
+
+scp root@172.16.0.101:/etc/kubernetes/admin.conf /root/.kube/config
+Troubleshooting kubectl connection
+If kubectl cannot connect to the cluster, verify the API server IP inside the kubeconfig file.
+
+vi /root/.kube/config
+Ensure the server address points to the control-plane node:
+
+172.16.0.101
+Verifying the Cluster
+Check the nodes:
+
+kubectl get nodes
+Check the system pods:
+
+kubectl -n kube-system get pods
 ```
